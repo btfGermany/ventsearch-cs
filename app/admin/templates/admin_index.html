@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unternehmensdaten-Aggregator - Verwaltung</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f5f5f5; }
+        .header { background: #2c3e50; color: white; padding: 1rem 2rem; }
+        .header h1 { margin: 0; font-size: 1.5rem; }
+        .nav { background: #34495e; padding: 0.5rem 2rem; }
+        .nav a { color: white; text-decoration: none; margin-right: 1rem; padding: 0.5rem; }
+        .nav a:hover { background: #2c3e50; }
+        .container { padding: 2rem; }
+        .card { background: white; padding: 1.5rem; margin-bottom: 1rem; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+        .stat-card { background: white; padding: 1.5rem; text-align: center; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stat-card .value { font-size: 2rem; font-weight: bold; color: #3498db; }
+        .stat-card .label { color: #7f8c8d; margin-top: 0.5rem; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #ecf0f1; }
+        th { background: #f8f9fa; font-weight: bold; }
+        .status-pending { color: #f39c12; }
+        .status-running { color: #3498db; }
+        .status-completed { color: #27ae60; }
+        .status-failed { color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Unternehmensdaten-Aggregator - Verwaltung</h1>
+    </div>
+    <div class="nav">
+        <a href="/admin/">Übersicht</a>
+        <a href="/admin/datenquellen">Datenquellen</a>
+        <a href="/admin/jobs">Jobs</a>
+        <a href="/admin/fehler">Fehler</a>
+        <a href="/admin/reviews">Reviews</a>
+        <a href="/admin/search">Suchtest</a>
+        <a href="/admin/status">Status</a>
+    </div>
+    <div class="container">
+        <div class="card">
+            <h2>Übersicht</h2>
+            <p>Willkommen im Admin-Bereich des Unternehmensdaten-Aggregators.</p>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="value">{{ company_count }}</div>
+                <div class="label">Unternehmen</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ source_count }}</div>
+                <div class="label">Quelldatensätze</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ pending_reviews }}</div>
+                <div class="label">Ausstehende Reviews</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">{{ pending_sanctions }}</div>
+                <div class="label">Ausstehende Sanktionen</div>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-top: 2rem;">
+            <h3>Letzte Ingestion-Jobs</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job-ID</th>
+                        <th>Typ</th>
+                        <th>Quelle</th>
+                        <th>Status</th>
+                        <th>Erstellt</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in recent_jobs %}
+                    <tr>
+                        <td>{{ job.job_id[:8] }}...</td>
+                        <td>{{ job.job_type }}</td>
+                        <td>{{ job.source or '-' }}</td>
+                        <td class="status-{{ job.status }}">{{ job.status }}</td>
+                        <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>

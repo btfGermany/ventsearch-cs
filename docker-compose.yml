@@ -1,0 +1,99 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: company_intel_db
+    environment:
+      POSTGRES_DB: company_intel
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - company_intel_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: company_intel_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - company_intel_network
+
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: company_intel_opensearch
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=admin123
+      - plugins.security.disabled=true
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - company_intel_network
+
+  web:
+    build: .
+    container_name: company_intel_web
+    command: python run.py
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/company_intel
+      CELERY_BROKER_URL: redis://:@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:@redis:6379/0
+      OPENSEARCH_URL: http://opensearch:9200
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+    networks:
+      - company_intel_network
+
+  worker:
+    build: .
+    container_name: company_intel_worker
+    command: celery -A app.celery_app worker --loglevel=info
+    depends_on:
+      - redis
+      - db
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/company_intel
+      CELERY_BROKER_URL: redis://:@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:@redis:6379/0
+      OPENSEARCH_URL: http://opensearch:9200
+    volumes:
+      - .:/app
+    networks:
+      - company_intel_network
+
+volumes:
+  postgres_data:
+  opensearch_data:
+
+networks:
+  company_intel_network:
+    driver: bridge
