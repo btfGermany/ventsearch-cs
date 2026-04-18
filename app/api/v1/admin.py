@@ -5,6 +5,7 @@ Admin operations for ingestion and management.
 """
 
 from flask import Blueprint, jsonify, request
+import uuid as uuid_module
 
 from app.core.extensions import db
 from app.models import IngestionJob, EntityMatchReview, Company
@@ -20,7 +21,7 @@ def trigger_ingest(source_name: str):
     
     # Create job record
     job = IngestionJob(
-        job_id=db.func.uuid(),  # This would need proper UUID generation
+        job_id=str(uuid_module.uuid4()),
         job_type='FULL_INGEST',
         source=source_name,
         status='pending',
@@ -43,7 +44,7 @@ def trigger_reindex():
     from app.tasks.indexing_tasks import run_reindex
     
     job = IngestionJob(
-        job_id=db.func.uuid(),
+        job_id=str(uuid_module.uuid4()),
         job_type='REINDEX',
         status='pending',
     )
