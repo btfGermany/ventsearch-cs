@@ -8,10 +8,16 @@ import logging
 import uuid
 from datetime import datetime
 from celery import shared_task
-from app.core.extensions import db
 
 
 logger = logging.getLogger('company_intel.tasks.ingestion')
+
+
+def get_app():
+    """Get Flask app instance for Celery context."""
+    from app import create_app
+    from app.core.config import get_config
+    return create_app(get_config())
 
 
 def get_source_connector(source_name: str):
@@ -43,12 +49,12 @@ def get_source_connector(source_name: str):
 def run_ingestion(self, source_name: str, full: bool = False):
     """Run full or incremental ingestion for a source."""
     from app.models import IngestionJob, SourceSyncState
-    from flask import current_app
+    from app.core.extensions import db
     
     job_id = str(uuid.uuid4())
+    app = get_app()
     
-    # Log to database
-    with current_app.app_context():
+    with app.app_context():
         job = IngestionJob(
             job_id=job_id,
             job_type='FULL_INGEST' if full else 'INCREMENTAL_SYNC',
@@ -61,10 +67,11 @@ def run_ingestion(self, source_name: str, full: bool = False):
         
         logger.info(f"Starting ingestion job {job_id} for {source_name}")
         
+        processed = 0
+        failed = 0
+        
         try:
             connector = get_source_connector(source_name)
-            processed = 0
-            failed = 0
             
             # Fetch records
             for record in connector.fetch_all():
@@ -80,129 +87,159 @@ def run_ingestion(self, source_name: str, full: bool = False):
                     logger.error(f"Failed to process record: {e}")
                     failed += 1
             
-            # Mark job complete
+            # Complete job
             job.status = 'completed'
             job.processed_items = processed
             job.failed_items = failed
             job.completed_at = datetime.utcnow()
-            job.results = {'processed': processed, 'failed': failed}
-            
-            # Update sync state
-            sync_state = SourceSyncState.query.filter_by(source=source_name).first()
-            if sync_state:
-                sync_state.last_sync_at = datetime.utcnow()
-                sync_state.total_synced += processed
-                sync_state.total_failed += failed
-                sync_state.sync_status = 'idle'
-            else:
-                sync_state = SourceSyncState(
-                    source=source_name,
-                    last_sync_at=datetime.utcnow(),
-                    total_synced=processed,
-                    total_failed=failed,
-                    sync_status='idle',
-                )
-                db.session.add(sync_state)
-            
             db.session.commit()
             
-            logger.info(f"Completed ingestion job {job_id}: {processed} processed, {failed} failed")
+            logger.info(f"Ingestion job {job_id} completed: {processed} processed, {failed} failed")
             
         except Exception as e:
-            logger.error(f"Ingestion job failed: {e}")
-            
+            logger.error(f"Ingestion job {job_id} failed: {e}")
             job.status = 'failed'
             job.error_message = str(e)
             job.completed_at = datetime.utcnow()
             db.session.commit()
-            
-            # Retry
             raise self.retry(exc=e, countdown=60)
     
     return {'job_id': job_id, 'processed': processed, 'failed': failed}
 
 
-@shared_task
-def run_matching():
-    """Run entity resolution matching for all companies."""
-    from app.models import Company
+@shared_task(bind=True, max_retries=3)
+def run_matching(self):
+    """Run entity matching on all companies."""
     from app.services.matching import MatchingService
+    from app.models import IngestionJob
+    from app.core.extensions import db
     
-    logger.info("Starting matching job")
+    job_id = str(uuid.uuid4())
+    app = get_app()
     
-    with db.app.app_context():
-        companies = Company.query.filter_by(is_merged=False).all()
-        service = MatchingService()
+    with app.app_context():
+        job = IngestionJob(
+            job_id=job_id,
+            job_type='MATCH',
+            status='running',
+            started_at=datetime.utcnow(),
+        )
+        db.session.add(job)
+        db.session.commit()
         
-        matches_found = 0
+        logger.info(f"Starting matching job {job_id}")
         
-        for company in companies:
-            matches = service.find_matches(company)
-            auto_merge = [m for m in matches if m.get('should_merge')]
+        matches = 0
+        
+        try:
+            matching_service = MatchingService()
+            matches = matching_service.match_all_companies()
             
-            for match in auto_merge[:1]:  # Only process best match
-                target = db.session.get(Company, match['company_id'])
-                if target:
-                    service.merge_companies(company, target)
-                    matches_found += 1
-        
-        logger.info(f"Matching complete: {matches_found} merges")
+            job.status = 'completed'
+            job.processed_items = matches
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            logger.info(f"Matching job {job_id} completed: {matches} matches")
+            
+        except Exception as e:
+            logger.error(f"Matching job {job_id} failed: {e}")
+            job.status = 'failed'
+            job.error_message = str(e)
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            raise self.retry(exc=e, countdown=60)
     
-    return {'matches_found': matches_found}
+    return {'job_id': job_id, 'matches': matches}
 
 
-@shared_task
-def run_screening():
-    """Run sanctions screening for all companies."""
-    from app.models import Company
+@shared_task(bind=True, max_retries=3)
+def run_screening(self, company_id: int = None):
+    """Run sanctions screening."""
     from app.services.screening import ScreeningService
+    from app.models import IngestionJob
+    from app.core.extensions import db
     
-    logger.info("Starting screening job")
+    job_id = str(uuid.uuid4())
+    app = get_app()
     
-    screened = 0
-    matches_found = 0
-    
-    with db.app.app_context():
-        companies = Company.query.filter_by(is_merged=False).all()
-        service = ScreeningService()
+    with app.app_context():
+        job = IngestionJob(
+            job_id=job_id,
+            job_type='SCREENING',
+            status='running',
+            started_at=datetime.utcnow(),
+        )
+        db.session.add(job)
+        db.session.commit()
         
-        for company in companies:
-            results = service.screen_company(company)
-            if results:
-                for result in results:
-                    entity_id = result['sanctions_entity_id']
-                    from app.models import SanctionsEntity
-                    entity = db.session.get(SanctionsEntity, entity_id)
-                    if entity:
-                        service.create_match_record(
-                            company=company,
-                            entity=entity,
-                            match_type=result['match_type'],
-                            match_score=result['match_score'],
-                            matched_field=result['matched_field'],
-                            matched_value=result['matched_value'],
-                        )
-                        matches_found += 1
-            screened += 1
+        logger.info(f"Starting screening job {job_id}")
         
-        logger.info(f"Screening complete: {screened} screened, {matches_found} matches")
+        hits = 0
+        
+        try:
+            screening_service = ScreeningService()
+            hits = screening_service.screen_company(company_id) if company_id else screening_service.screen_all()
+            
+            job.status = 'completed'
+            job.processed_items = hits
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            logger.info(f"Screening job {job_id} completed: {hits} hits")
+            
+        except Exception as e:
+            logger.error(f"Screening job {job_id} failed: {e}")
+            job.status = 'failed'
+            job.error_message = str(e)
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            raise self.retry(exc=e, countdown=60)
     
-    return {'screened': screened, 'matches_found': matches_found}
+    return {'job_id': job_id, 'hits': hits}
 
 
-@shared_task
-def run_discovery():
-    """Run dataset discovery crawler."""
-    from app.services.discovery.crawler import DiscoveryCrawler
+@shared_task(bind=True, max_retries=3)
+def run_discovery(self):
+    """Run dataset discovery."""
+    from app.services.discovery import DatasetDiscoveryService
+    from app.models import IngestionJob
+    from app.core.extensions import db
     
-    logger.info("Starting discovery crawl")
+    job_id = str(uuid.uuid4())
+    app = get_app()
     
-    count = 0
-    
-    with db.app.app_context():
-        crawler = DiscoveryCrawler()
-        count = crawler.crawl()
+    with app.app_context():
+        job = IngestionJob(
+            job_id=job_id,
+            job_type='DISCOVERY',
+            status='running',
+            started_at=datetime.utcnow(),
+        )
+        db.session.add(job)
+        db.session.commit()
         
-        logger.info(f"Discovery complete: {count} datasets")
+        logger.info(f"Starting discovery job {job_id}")
+        
+        discovered = 0
+        
+        try:
+            discovery_service = DatasetDiscoveryService()
+            discovered = discovery_service.discover_all()
+            
+            job.status = 'completed'
+            job.processed_items = discovered
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            logger.info(f"Discovery job {job_id} completed: {discovered} datasets")
+            
+        except Exception as e:
+            logger.error(f"Discovery job {job_id} failed: {e}")
+            job.status = 'failed'
+            job.error_message = str(e)
+            job.completed_at = datetime.utcnow()
+            db.session.commit()
+            raise self.retry(exc=e, countdown=60)
     
-    return {'datasets_found': count}
+    return {'job_id': job_id, 'discovered': discovered}
